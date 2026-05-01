@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Corporate Catharsis VR</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #111;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: white;
+        }
+        #ui-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 10;
+            text-align: center;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        h1 {
+            color: #ff4d4d;
+            font-size: 4rem;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 4px;
+            font-weight: 800;
+        }
+        h2 {
+            font-size: 1.2rem;
+            font-weight: 400;
+            margin-bottom: 30px;
+            color: #ccc;
+        }
+        .instructions {
+            background: rgba(30, 30, 30, 0.8);
+            padding: 25px;
+            border-radius: 12px;
+            border: 1px solid #444;
+            max-width: 700px;
+            margin-bottom: 40px;
+            text-align: left;
+            backdrop-filter: blur(5px);
+        }
+        .instructions p {
+            margin: 15px 0;
+            font-size: 1.1rem;
+            line-height: 1.4;
+        }
+        .highlight { color: #4caf50; font-weight: bold; }
+        
+        /* Styling the WebXR button container */
+        #webxr-button-container button {
+            background-color: #ff4d4d !important;
+            color: white !important;
+            border: none !important;
+            padding: 15px 40px !important;
+            font-size: 1.2rem !important;
+            font-weight: bold !important;
+            border-radius: 8px !important;
+            cursor: pointer !important;
+            text-transform: uppercase !important;
+        }
+        #error-msg {
+            color: #ff5555;
+            margin-top: 20px;
+            display: none;
+        }
+    </style>
+    
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.150.1/examples/jsm/",
+                "three-mesh-bvh": "https://unpkg.com/three-mesh-bvh@0.5.23/build/index.module.js"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="ui-container">
+        <h1>Corporate Catharsis</h1>
+        <h2>Deadline Missed. Time to break everything.</h2>
+        <div class="instructions">
+            <p><span class="highlight">Walk:</span> Show the BACK of both your palms to yourself and push AWAY from your body.</p>
+            <p><span class="highlight">Grab & Throw:</span> Pinch your index and thumb together on objects (works for both hands).</p>
+            <p><span class="highlight">Punch:</span> Make a fist with either hand and hit objects to shatter them.</p>
+        </div>
+        <div id="webxr-button-container"></div>
+        <div id="error-msg">WebXR or Hand Tracking not supported on this browser/device.</div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { VRButton } from 'three/addons/webxr/VRButton.js';
+        import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
+        import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+
+        THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+        THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+        THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+        let scene, camera, renderer, dolly;
+        let hand1, hand2, handModelFactory;
+        let leftHandObj = null, rightHandObj = null;
+        
+        const interactables = [];
+        const clock = new THREE.Clock();
+        
+        let grabbedObject = null;
+        let rightPinchState = false;
+
+        let playerVelocity = new THREE.Vector3();
+        const FRICTION = 0.92; 
+        const GRAVITY = 9.8;
+        const FLOOR_Y = 0;
+        const ROOM_SIZE = 7.5; 
+
+        const tempBox1 = new THREE.Box3();
+        const tempBox2 = new THREE.Box3();
+
+        init();
+        animate();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x111111);
+
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 50);
+            
+            dolly = new THREE.Group();
+            dolly.position.set(0, 0, 3);
+            scene.add(dolly);
+            dolly.add(camera);
+
+            scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.6));
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+            dirLight.position.set(5, 10, 5);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.xr.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            const vrButton = VRButton.createButton(renderer, {
+                requiredFeatures: ['hand-tracking', 'local-floor']
+            });
+            // Override the default Three.js text
+            vrButton.textContent = "ENTER OFFICE";
+            document.getElementById('webxr-button-container').appendChild(vrButton);
+
+            renderer.xr.addEventListener('sessionstart', () => {
+                document.getElementById('ui-container').style.display = 'none';
+            });
+            renderer.xr.addEventListener('sessionend', () => {
+                document.getElementById('ui-container').style.display = 'flex';
+                dolly.position.set(0, 0, 3);
+                playerVelocity.set(0, 0, 0);
+            });
+
+            buildRoom();
+            buildObjects();
+            setupHands();
+
+            window.addEventListener('resize', onWindowResize);
+            
+            // Trigger an initial render so the preview shows up behind the UI
+            renderer.render(scene, camera);
+        }
+
+        function buildRoom() {
+            // Generating a procedural checkerboard texture for the floor
+            const canvas = document.createElement('canvas');
+            canvas.width = 512;
+            canvas.height = 512;
+            const context = canvas.getContext('2d');
+            context.fillStyle = '#222';
+            context.fillRect(0, 0, 512, 512);
+            context.fillStyle = '#555';
+            for (let i = 0; i < 8; i++) {
+                for (let j = 0; j < 8; j++) {
+                    if ((i + j) % 2 === 0) context.fillRect(i * 64, j * 64, 64, 64);
+                }
+            }
+            const checkerTexture = new THREE.CanvasTexture(canvas);
+            checkerTexture.wrapS = THREE.RepeatWrapping;
+            checkerTexture.wrapT = THREE.RepeatWrapping;
+            checkerTexture.repeat.set(10, 10);
+
+            const floorGeo = new THREE.PlaneGeometry(30, 30);
+            const floorMat = new THREE.MeshStandardMaterial({ map: checkerTexture, roughness: 0.8 }); 
+            const floor = new THREE.Mesh(floorGeo, floorMat);
+            floor.rotation.x = -Math.PI / 2;
+            floor.receiveShadow = true;
+            scene.add(floor);
+
+            // Back wall
+            const wallMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
+            const wallGeo = new THREE.PlaneGeometry(15, 5);
+            const wall = new THREE.Mesh(wallGeo, wallMat);
+            wall.position.set(0, 2.5, -7.5);
+            scene.add(wall);
+        }
+
+        function createPhysicsMesh(geometry, material, type, mass = 1, isGrabbable = true) {
+            geometry.computeBoundsTree();
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            
+            mesh.userData = {
+                type: type,
+                mass: mass,
+                grabbable: isGrabbable,
+                grabbed: false,
+                broken: false,
+                velocity: new THREE.Vector3(),
+                angularVelocity: new THREE.Vector3(),
+                radius: 0.5 
+            };
+
+            mesh.geometry.computeBoundingSphere();
+            if(mesh.geometry.boundingSphere) mesh.userData.radius = mesh.geometry.boundingSphere.radius;
+
+            mesh.userData.break = function() {
+                if (this.broken) return;
+                this.broken = true;
+                mesh.material.color.setHex(Math.random() * 0xffffff); // Random color on break
+                this.velocity.set((Math.random()-0.5)*4, 3, (Math.random()-0.5)*4);
+                this.angularVelocity.set(Math.random()*5, Math.random()*5, Math.random()*5);
+            };
+
+            scene.add(mesh);
+            interactables.push(mesh);
+            return mesh;
+        }
+
+        function buildObjects() {
+            const mat1 = new THREE.MeshStandardMaterial({ color: 0x2255aa });
+            const mat2 = new THREE.MeshStandardMaterial({ color: 0xaa2222 });
+
+            for(let i=0; i<5; i++) {
+                const box = createPhysicsMesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), mat1.clone(), 'box');
+                box.position.set(-2 + i, 1, -3 - i*0.5);
+                
+                const cylinder = createPhysicsMesh(new THREE.CylinderGeometry(0.2, 0.2, 0.6), mat2.clone(), 'cyl');
+                cylinder.position.set(-2 + i, 2, -3 - i*0.5);
+            }
+        }
+
+        function setupHands() {
+            handModelFactory = new XRHandModelFactory();
+            hand1 = renderer.xr.getHand(0);
+            hand2 = renderer.xr.getHand(1);
+            dolly.add(hand1);
+            dolly.add(hand2);
+            hand1.add(handModelFactory.createHandModel(hand1, 'mesh'));
+            hand2.add(handModelFactory.createHandModel(hand2, 'mesh'));
+
+            const setupHandData = (hand) => {
+                hand.userData = { prevPos: new THREE.Vector3(), velocity: new THREE.Vector3(), isPalmShowing: false };
+            };
+            setupHandData(hand1);
+            setupHandData(hand2);
+
+            const onHandConnect = (event) => {
+                const hand = event.target;
+                if (event.data.handedness === 'left') leftHandObj = hand;
+                if (event.data.handedness === 'right') rightHandObj = hand;
+            };
+            hand1.addEventListener('connected', onHandConnect);
+            hand2.addEventListener('connected', onHandConnect);
+        }
+
+        function updatePhysics(dt) {
+            interactables.forEach(obj => {
+                if (obj.userData.grabbed) return;
+                obj.userData.velocity.y -= GRAVITY * dt;
+                obj.position.addScaledVector(obj.userData.velocity, dt);
+                obj.rotation.x += obj.userData.angularVelocity.x * dt;
+                obj.rotation.y += obj.userData.angularVelocity.y * dt;
+                obj.rotation.z += obj.userData.angularVelocity.z * dt;
+
+                const radius = obj.userData.radius || 0.2;
+                if (obj.position.y < FLOOR_Y + radius) {
+                    obj.position.y = FLOOR_Y + radius;
+                    obj.userData.velocity.y *= -0.4; 
+                    obj.userData.velocity.x *= 0.8;
+                    obj.userData.velocity.z *= 0.8;
+                }
+            });
+        }
+
+        function handleGestures(dt) {
+            // Process hands to calculate velocity and palm orientation
+            const hands = [leftHandObj, rightHandObj].filter(h => h && h.joints && h.joints['wrist']);
+            
+            hands.forEach(hand => {
+                const wrist = hand.joints['wrist'];
+                const wPos = new THREE.Vector3().setFromMatrixPosition(wrist.matrixWorld);
+                
+                const currentVel = new THREE.Vector3().subVectors(wPos, hand.userData.prevPos).divideScalar(dt);
+                hand.userData.velocity.lerp(currentVel, 0.2); 
+                hand.userData.prevPos.copy(wPos);
+
+                const palmNormal = new THREE.Vector3(0, -1, 0).applyQuaternion(wrist.quaternion);
+                const headsetForward = new THREE.Vector3();
+                camera.getWorldDirection(headsetForward);
+                headsetForward.y = 0;
+                headsetForward.normalize();
+                
+                hand.userData.isPalmShowing = Math.abs(palmNormal.dot(headsetForward)) > 0.55;
+            });
+
+            // --- Locomotion Logic ---
+            if (leftHandObj && rightHandObj && leftHandObj.userData.isPalmShowing && rightHandObj.userData.isPalmShowing) {
+                const headsetForward = new THREE.Vector3();
+                camera.getWorldDirection(headsetForward);
+                headsetForward.y = 0;
+                headsetForward.normalize();
+
+                const avgVel = new THREE.Vector3().addVectors(leftHandObj.userData.velocity, rightHandObj.userData.velocity).multiplyScalar(0.5);
+                let thrust = avgVel.dot(headsetForward);
+
+                if (Math.abs(thrust) > 0.2) {
+                    const speedMultiplier = 0.179; 
+                    const targetVel = headsetForward.clone().multiplyScalar(thrust * speedMultiplier);
+                    playerVelocity.lerp(targetVel, 0.1);
+                } else {
+                    playerVelocity.multiplyScalar(FRICTION);
+                }
+            } else {
+                playerVelocity.multiplyScalar(FRICTION);
+            }
+
+            // Apply movement to the player's rig (dolly)
+            dolly.position.addScaledVector(playerVelocity, dt * 10);
+            
+            // Keep player inside the room bounds
+            const playerLimit = ROOM_SIZE - 0.5;
+            dolly.position.x = Math.max(-playerLimit, Math.min(playerLimit, dolly.position.x));
+            dolly.position.z = Math.max(-playerLimit, Math.min(playerLimit, dolly.position.z));
+
+            // --- Interaction Logic ---
+            if (rightHandObj && rightHandObj.joints['wrist']) {
+                const wrist = rightHandObj.joints['wrist'];
+                const indexTip = rightHandObj.joints['index-finger-tip'];
+                const thumbTip = rightHandObj.joints['thumb-tip'];
+                const middleTip = rightHandObj.joints['middle-finger-tip'];
+
+                if (indexTip && thumbTip && middleTip) {
+                    const iPos = new THREE.Vector3().setFromMatrixPosition(indexTip.matrixWorld);
+                    const tPos = new THREE.Vector3().setFromMatrixPosition(thumbTip.matrixWorld);
+                    const mPos = new THREE.Vector3().setFromMatrixPosition(middleTip.matrixWorld);
+                    const wPos = new THREE.Vector3().setFromMatrixPosition(wrist.matrixWorld);
+                    
+                    const isPinching = iPos.distanceTo(tPos) < 0.035;
+                    const isFist = wPos.distanceTo(mPos) < 0.12;
+
+                    if (isFist) {
+                        tempBox1.setFromCenterAndSize(wPos, new THREE.Vector3(0.3, 0.3, 0.3));
+                        interactables.forEach(obj => {
+                            if (obj.userData.broken) return;
+                            tempBox2.setFromObject(obj);
+                            if (tempBox1.intersectsBox(tempBox2)) obj.userData.break();
+                        });
+                    }
+
+                    if (isPinching && !rightPinchState && !grabbedObject) {
+                        let closest = null, minDist = 0.35; 
+                        interactables.forEach(obj => {
+                            const d = iPos.distanceTo(obj.position);
+                            if (d < minDist && obj.userData.grabbable) { minDist = d; closest = obj; }
+                        });
+                        if (closest) {
+                            grabbedObject = closest;
+                            grabbedObject.userData.grabbed = true;
+                            grabbedObject.userData.velocity.set(0,0,0);
+                        }
+                    } else if (!isPinching && rightPinchState && grabbedObject) {
+                        grabbedObject.userData.grabbed = false;
+                        grabbedObject = null;
+                    }
+                    if (grabbedObject) grabbedObject.position.lerp(iPos, 0.25);
+                    rightPinchState = isPinching;
+                }
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            renderer.setAnimationLoop(render);
+        }
+
+        function render() {
+            const dt = Math.max(Math.min(clock.getDelta(), 0.05), 0.001); 
+            if (renderer.xr.isPresenting) {
+                handleGestures(dt);
+                updatePhysics(dt);
+            }
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
