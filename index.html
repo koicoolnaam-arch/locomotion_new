@@ -232,6 +232,8 @@
                 grabbed: false,
                 broken: false,
                 isThrown: false,
+                hits: 0,
+                lastHit: 0,
                 velocity: new THREE.Vector3(),
                 angularVelocity: new THREE.Vector3(),
                 radius: 0.5 
@@ -317,9 +319,11 @@
                 if (obj.userData.grabbed) return;
                 obj.userData.velocity.y -= GRAVITY * dt;
                 obj.position.addScaledVector(obj.userData.velocity, dt);
-                obj.rotation.x += obj.userData.angularVelocity.x * dt;
-                obj.rotation.y += obj.userData.angularVelocity.y * dt;
-                obj.rotation.z += obj.userData.angularVelocity.z * dt;
+                
+                // ROTATION HAS BEEN DISABLED AS REQUESTED
+                // obj.rotation.x += obj.userData.angularVelocity.x * dt;
+                // obj.rotation.y += obj.userData.angularVelocity.y * dt;
+                // obj.rotation.z += obj.userData.angularVelocity.z * dt;
 
                 const radius = obj.userData.radius || 0.2;
                 if (obj.position.y < FLOOR_Y + radius) {
@@ -338,6 +342,12 @@
         }
 
         function handleGestures(dt) {
+            // Camera velocity calculation to cancel out head movement
+            if (!camera.userData.prevPos) camera.userData.prevPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+            const camPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+            const camVel = new THREE.Vector3().subVectors(camPos, camera.userData.prevPos).divideScalar(dt);
+            camera.userData.prevPos.copy(camPos);
+
             // Process hands to calculate velocity and palm orientation
             const hands = [leftHandObj, rightHandObj].filter(h => h && h.joints && h.joints['wrist']);
             
@@ -345,8 +355,11 @@
                 const wrist = hand.joints['wrist'];
                 const wPos = new THREE.Vector3().setFromMatrixPosition(wrist.matrixWorld);
                 
-                const currentVel = new THREE.Vector3().subVectors(wPos, hand.userData.prevPos).divideScalar(dt);
-                hand.userData.velocity.lerp(currentVel, 0.2); 
+                // Subtract camVel to prevent head movement from triggering locomotion
+                const worldVel = new THREE.Vector3().subVectors(wPos, hand.userData.prevPos).divideScalar(dt);
+                const relativeVel = new THREE.Vector3().subVectors(worldVel, camVel);
+                
+                hand.userData.velocity.lerp(relativeVel, 0.2); 
                 hand.userData.prevPos.copy(wPos);
 
                 const palmNormal = new THREE.Vector3(0, -1, 0).applyQuaternion(wrist.quaternion);
@@ -369,7 +382,7 @@
                 let thrust = avgVel.dot(headsetForward);
 
                 if (Math.abs(thrust) > 0.2) {
-                    const speedMultiplier = 0.170; // Adjusted locomotion speed
+                    const speedMultiplier = 0.150; // Adjusted locomotion speed
                     const targetVel = headsetForward.clone().multiplyScalar(thrust * speedMultiplier);
                     playerVelocity.lerp(targetVel, 0.1);
                 } else {
@@ -405,10 +418,25 @@
 
                     if (isFist) {
                         tempBox1.setFromCenterAndSize(wPos, new THREE.Vector3(0.3, 0.3, 0.3));
+                        const now = clock.getElapsedTime();
                         interactables.forEach(obj => {
                             if (obj.userData.broken) return;
                             tempBox2.setFromObject(obj);
-                            if (tempBox1.intersectsBox(tempBox2)) obj.userData.break();
+                            if (tempBox1.intersectsBox(tempBox2)) {
+                                // Add a cooldown of 0.4 seconds between registered hits
+                                if (!obj.userData.lastHit || now - obj.userData.lastHit > 0.4) {
+                                    obj.userData.lastHit = now;
+                                    obj.userData.hits = (obj.userData.hits || 0) + 1;
+                                    
+                                    if (obj.userData.hits >= 4) {
+                                        obj.userData.break();
+                                    } else {
+                                        // Small push to visually register the punch
+                                        const pushVel = rightHandObj.userData.velocity.clone().multiplyScalar(0.5);
+                                        obj.userData.velocity.add(pushVel);
+                                    }
+                                }
+                            }
                         });
                     }
 
