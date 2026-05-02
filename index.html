@@ -342,24 +342,18 @@
         }
 
         function handleGestures(dt) {
-            // Camera velocity calculation to cancel out head movement
-            if (!camera.userData.prevPos) camera.userData.prevPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
-            const camPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
-            const camVel = new THREE.Vector3().subVectors(camPos, camera.userData.prevPos).divideScalar(dt);
-            camera.userData.prevPos.copy(camPos);
-
-            // Process hands to calculate velocity and palm orientation
+            // Process hands to calculate true real-world velocity without dolly feedback
             const hands = [leftHandObj, rightHandObj].filter(h => h && h.joints && h.joints['wrist']);
             
             hands.forEach(hand => {
                 const wrist = hand.joints['wrist'];
                 const wPos = new THREE.Vector3().setFromMatrixPosition(wrist.matrixWorld);
                 
-                // Subtract camVel to prevent head movement from triggering locomotion
-                const worldVel = new THREE.Vector3().subVectors(wPos, hand.userData.prevPos).divideScalar(dt);
-                const relativeVel = new THREE.Vector3().subVectors(worldVel, camVel);
+                // Subtract dolly position so we strictly measure real-world arm pushes, ignoring dolly glide
+                wPos.sub(dolly.position);
                 
-                hand.userData.velocity.lerp(relativeVel, 0.2); 
+                const currentVel = new THREE.Vector3().subVectors(wPos, hand.userData.prevPos).divideScalar(dt);
+                hand.userData.velocity.lerp(currentVel, 0.2); 
                 hand.userData.prevPos.copy(wPos);
 
                 const palmNormal = new THREE.Vector3(0, -1, 0).applyQuaternion(wrist.quaternion);
@@ -381,8 +375,9 @@
                 const avgVel = new THREE.Vector3().addVectors(leftHandObj.userData.velocity, rightHandObj.userData.velocity).multiplyScalar(0.5);
                 let thrust = avgVel.dot(headsetForward);
 
-                if (Math.abs(thrust) > 0.2) {
-                    const speedMultiplier = 0.150; // Adjusted locomotion speed
+                // Deadzone lowered to 0.1 so it easily picks up deliberate pushes
+                if (Math.abs(thrust) > 0.1) {
+                    const speedMultiplier = 0.162; // Adjusted locomotion speed exactly as requested
                     const targetVel = headsetForward.clone().multiplyScalar(thrust * speedMultiplier);
                     playerVelocity.lerp(targetVel, 0.1);
                 } else {
