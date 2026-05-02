@@ -433,9 +433,9 @@
             }
 
             if (isGliding) {
-                // Apply strict constant speed of 0.165 as requested. 
+                // Apply strict constant speed of 0.140 as requested. 
                 // We use a gentle lerp factor (0.05) to ensure the start and stop of movement feels incredibly smooth.
-                const targetVel = headsetForward.clone().multiplyScalar(0.165);
+                const targetVel = headsetForward.clone().multiplyScalar(0.140);
                 playerVelocity.lerp(targetVel, 0.05); 
             } else {
                 playerVelocity.multiplyScalar(FRICTION);
