@@ -119,9 +119,6 @@
         
         const interactables = [];
         const clock = new THREE.Clock();
-        
-        let grabbedObject = null;
-        let rightPinchState = false;
 
         let playerVelocity = new THREE.Vector3();
         const FRICTION = 0.92; 
@@ -162,7 +159,6 @@
             const vrButton = VRButton.createButton(renderer, {
                 requiredFeatures: ['hand-tracking', 'local-floor']
             });
-            // Override the default Three.js text
             vrButton.textContent = "ENTER OFFICE";
             document.getElementById('webxr-button-container').appendChild(vrButton);
 
@@ -181,12 +177,10 @@
 
             window.addEventListener('resize', onWindowResize);
             
-            // Trigger an initial render so the preview shows up behind the UI
             renderer.render(scene, camera);
         }
 
         function buildRoom() {
-            // Generating a procedural checkerboard texture for the floor
             const canvas = document.createElement('canvas');
             canvas.width = 512;
             canvas.height = 512;
@@ -211,7 +205,6 @@
             floor.receiveShadow = true;
             scene.add(floor);
 
-            // Back wall
             const wallMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
             const wallGeo = new THREE.PlaneGeometry(15, 5);
             const wall = new THREE.Mesh(wallGeo, wallMat);
@@ -235,7 +228,6 @@
                 hits: 0,
                 lastHit: 0,
                 velocity: new THREE.Vector3(),
-                angularVelocity: new THREE.Vector3(),
                 radius: 0.5 
             };
 
@@ -246,9 +238,9 @@
                 if (this.broken) return;
                 this.broken = true;
                 
-                // Spawn shatter debris if it is not already a debris piece
+                // Spawn lightweight shatter debris
                 if (this.type !== 'debris') {
-                    const pieceCount = 8;
+                    const pieceCount = 6;
                     for (let i = 0; i < pieceCount; i++) {
                         const size = this.radius * (Math.random() * 0.4 + 0.4);
                         const pieceGeo = new THREE.BoxGeometry(size, size, size);
@@ -258,17 +250,15 @@
                         piece.position.y += (Math.random() - 0.5) * this.radius;
                         piece.position.z += (Math.random() - 0.5) * this.radius;
 
-                        // Explode outwards based on current velocity
                         piece.userData.velocity.copy(this.velocity).multiplyScalar(0.5);
                         piece.userData.velocity.x += (Math.random() - 0.5) * 4;
                         piece.userData.velocity.y += Math.random() * 3 + 1;
                         piece.userData.velocity.z += (Math.random() - 0.5) * 4;
-                        piece.userData.angularVelocity.set(Math.random()*10, Math.random()*10, Math.random()*10);
                     }
                 }
 
                 scene.remove(mesh);
-                mesh.position.set(0, -1000, 0); // Hide original mesh
+                mesh.position.set(0, -1000, 0); 
                 this.velocity.set(0, 0, 0);
             };
 
@@ -294,13 +284,19 @@
             handModelFactory = new XRHandModelFactory();
             hand1 = renderer.xr.getHand(0);
             hand2 = renderer.xr.getHand(1);
+            
+            // Attaching hands to dolly so they move naturally with the body rig
             dolly.add(hand1);
             dolly.add(hand2);
+            
             hand1.add(handModelFactory.createHandModel(hand1, 'mesh'));
             hand2.add(handModelFactory.createHandModel(hand2, 'mesh'));
 
             const setupHandData = (hand) => {
-                hand.userData = { prevPos: new THREE.Vector3(), velocity: new THREE.Vector3(), isPalmShowing: false };
+                hand.userData = { 
+                    grabbedObject: null,
+                    pinchState: false 
+                };
             };
             setupHandData(hand1);
             setupHandData(hand2);
@@ -317,21 +313,18 @@
         function updatePhysics(dt) {
             interactables.forEach(obj => {
                 if (obj.userData.grabbed) return;
+                
                 obj.userData.velocity.y -= GRAVITY * dt;
                 obj.position.addScaledVector(obj.userData.velocity, dt);
                 
-                // ROTATION HAS BEEN DISABLED AS REQUESTED
-                // obj.rotation.x += obj.userData.angularVelocity.x * dt;
-                // obj.rotation.y += obj.userData.angularVelocity.y * dt;
-                // obj.rotation.z += obj.userData.angularVelocity.z * dt;
+                // ROTATION EXPLICITLY DISABLED
+                // No angular velocity processing here
 
                 const radius = obj.userData.radius || 0.2;
                 if (obj.position.y < FLOOR_Y + radius) {
                     if (obj.userData.isThrown) {
-                        // Shatter into pieces on floor impact if thrown
                         obj.userData.break();
                     } else {
-                        // Regular bounce
                         obj.position.y = FLOOR_Y + radius;
                         obj.userData.velocity.y *= -0.4; 
                         obj.userData.velocity.x *= 0.8;
@@ -342,83 +335,55 @@
         }
 
         function handleGestures(dt) {
-            // Process hands to calculate true real-world velocity without dolly feedback
-            const hands = [leftHandObj, rightHandObj].filter(h => h && h.joints && h.joints['wrist']);
-            
-            hands.forEach(hand => {
+            const camWorldPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+            const headsetForward = new THREE.Vector3();
+            camera.getWorldDirection(headsetForward);
+            headsetForward.y = 0;
+            headsetForward.normalize();
+
+            const activeHands = [leftHandObj, rightHandObj].filter(h => h && h.joints && h.joints['wrist']);
+            let isPushing = false;
+
+            activeHands.forEach(hand => {
                 const wrist = hand.joints['wrist'];
-                const wPos = new THREE.Vector3().setFromMatrixPosition(wrist.matrixWorld);
+                const wWorldPos = new THREE.Vector3().setFromMatrixPosition(wrist.matrixWorld);
                 
-                // Subtract dolly position so we strictly measure real-world arm pushes, ignoring dolly glide
-                wPos.sub(dolly.position);
-                
-                const currentVel = new THREE.Vector3().subVectors(wPos, hand.userData.prevPos).divideScalar(dt);
-                hand.userData.velocity.lerp(currentVel, 0.2); 
-                hand.userData.prevPos.copy(wPos);
+                // Track true absolute velocity for throwing physics
+                if (!hand.userData.prevAbsPos) hand.userData.prevAbsPos = wWorldPos.clone();
+                hand.userData.absVelocity = new THREE.Vector3().subVectors(wWorldPos, hand.userData.prevAbsPos).divideScalar(dt);
+                hand.userData.prevAbsPos.copy(wWorldPos);
 
+                // Track camera-relative velocity strictly for locomotion (ignoring dolly glides)
+                const wRelPos = wWorldPos.clone().sub(camWorldPos);
+                if (!hand.userData.prevRelPos) hand.userData.prevRelPos = wRelPos.clone();
+                hand.userData.relVelocity = new THREE.Vector3().subVectors(wRelPos, hand.userData.prevRelPos).divideScalar(dt);
+                hand.userData.prevRelPos.copy(wRelPos);
+
+                // Check palm facing direction
                 const palmNormal = new THREE.Vector3(0, -1, 0).applyQuaternion(wrist.quaternion);
-                const headsetForward = new THREE.Vector3();
-                camera.getWorldDirection(headsetForward);
-                headsetForward.y = 0;
-                headsetForward.normalize();
-                
-                hand.userData.isPalmShowing = Math.abs(palmNormal.dot(headsetForward)) > 0.55;
-            });
+                hand.userData.isPalmFacingAway = palmNormal.dot(headsetForward) > 0.1; // Forgiving threshold for "pushing away"
 
-            // --- Locomotion Logic ---
-            if (leftHandObj && rightHandObj && leftHandObj.userData.isPalmShowing && rightHandObj.userData.isPalmShowing) {
-                const headsetForward = new THREE.Vector3();
-                camera.getWorldDirection(headsetForward);
-                headsetForward.y = 0;
-                headsetForward.normalize();
-
-                const avgVel = new THREE.Vector3().addVectors(leftHandObj.userData.velocity, rightHandObj.userData.velocity).multiplyScalar(0.5);
-                let thrust = avgVel.dot(headsetForward);
-
-                // Deadzone lowered to 0.1 so it easily picks up deliberate pushes
-                if (Math.abs(thrust) > 0.1) {
-                    const speedMultiplier = 0.162; // Adjusted locomotion speed exactly as requested
-                    const targetVel = headsetForward.clone().multiplyScalar(thrust * speedMultiplier);
-                    playerVelocity.lerp(targetVel, 0.1);
-                } else {
-                    playerVelocity.multiplyScalar(FRICTION);
-                }
-            } else {
-                playerVelocity.multiplyScalar(FRICTION);
-            }
-
-            // Apply movement to the player's rig (dolly)
-            dolly.position.addScaledVector(playerVelocity, dt * 10);
-            
-            // Keep player inside the room bounds
-            const playerLimit = ROOM_SIZE - 0.5;
-            dolly.position.x = Math.max(-playerLimit, Math.min(playerLimit, dolly.position.x));
-            dolly.position.z = Math.max(-playerLimit, Math.min(playerLimit, dolly.position.z));
-
-            // --- Interaction Logic ---
-            if (rightHandObj && rightHandObj.joints['wrist']) {
-                const wrist = rightHandObj.joints['wrist'];
-                const indexTip = rightHandObj.joints['index-finger-tip'];
-                const thumbTip = rightHandObj.joints['thumb-tip'];
-                const middleTip = rightHandObj.joints['middle-finger-tip'];
+                // Interaction Logic (Pinch to Grab, Fist to Punch)
+                const indexTip = hand.joints['index-finger-tip'];
+                const thumbTip = hand.joints['thumb-tip'];
+                const middleTip = hand.joints['middle-finger-tip'];
 
                 if (indexTip && thumbTip && middleTip) {
                     const iPos = new THREE.Vector3().setFromMatrixPosition(indexTip.matrixWorld);
                     const tPos = new THREE.Vector3().setFromMatrixPosition(thumbTip.matrixWorld);
                     const mPos = new THREE.Vector3().setFromMatrixPosition(middleTip.matrixWorld);
-                    const wPos = new THREE.Vector3().setFromMatrixPosition(wrist.matrixWorld);
                     
                     const isPinching = iPos.distanceTo(tPos) < 0.035;
-                    const isFist = wPos.distanceTo(mPos) < 0.12;
+                    const isFist = wWorldPos.distanceTo(mPos) < 0.12;
 
+                    // Punch Logic - Breaks after 4 punches
                     if (isFist) {
-                        tempBox1.setFromCenterAndSize(wPos, new THREE.Vector3(0.3, 0.3, 0.3));
+                        tempBox1.setFromCenterAndSize(wWorldPos, new THREE.Vector3(0.3, 0.3, 0.3));
                         const now = clock.getElapsedTime();
                         interactables.forEach(obj => {
                             if (obj.userData.broken) return;
                             tempBox2.setFromObject(obj);
                             if (tempBox1.intersectsBox(tempBox2)) {
-                                // Add a cooldown of 0.4 seconds between registered hits
                                 if (!obj.userData.lastHit || now - obj.userData.lastHit > 0.4) {
                                     obj.userData.lastHit = now;
                                     obj.userData.hits = (obj.userData.hits || 0) + 1;
@@ -426,8 +391,8 @@
                                     if (obj.userData.hits >= 4) {
                                         obj.userData.break();
                                     } else {
-                                        // Small push to visually register the punch
-                                        const pushVel = rightHandObj.userData.velocity.clone().multiplyScalar(0.5);
+                                        const pushVel = hand.userData.absVelocity.clone().multiplyScalar(0.5);
+                                        if (pushVel.length() < 0.5) pushVel.add(headsetForward.clone().multiplyScalar(1.5));
                                         obj.userData.velocity.add(pushVel);
                                     }
                                 }
@@ -435,30 +400,63 @@
                         });
                     }
 
-                    if (isPinching && !rightPinchState && !grabbedObject) {
+                    // Grab Logic
+                    if (isPinching && !hand.userData.pinchState && !hand.userData.grabbedObject) {
                         let closest = null, minDist = 0.35; 
                         interactables.forEach(obj => {
                             const d = iPos.distanceTo(obj.position);
-                            if (d < minDist && obj.userData.grabbable) { minDist = d; closest = obj; }
+                            if (d < minDist && obj.userData.grabbable && !obj.userData.grabbed) { 
+                                minDist = d; closest = obj; 
+                            }
                         });
                         if (closest) {
-                            grabbedObject = closest;
-                            grabbedObject.userData.grabbed = true;
-                            grabbedObject.userData.velocity.set(0,0,0);
-                            grabbedObject.userData.isThrown = false; // Reset thrown state on grab
+                            hand.userData.grabbedObject = closest;
+                            closest.userData.grabbed = true;
+                            closest.userData.velocity.set(0,0,0);
+                            closest.userData.isThrown = false;
                         }
-                    } else if (!isPinching && rightPinchState && grabbedObject) {
+                    } else if (!isPinching && hand.userData.pinchState && hand.userData.grabbedObject) {
                         // Release & Throw Logic
-                        grabbedObject.userData.grabbed = false;
-                        const throwVel = rightHandObj.userData.velocity.clone().multiplyScalar(1.5);
-                        grabbedObject.userData.velocity.copy(throwVel);
-                        grabbedObject.userData.isThrown = true; // Flag for shattering on floor impact
-                        grabbedObject = null;
+                        const obj = hand.userData.grabbedObject;
+                        obj.userData.grabbed = false;
+                        const throwVel = hand.userData.absVelocity.clone().multiplyScalar(1.5);
+                        obj.userData.velocity.copy(throwVel);
+                        obj.userData.isThrown = true;
+                        hand.userData.grabbedObject = null;
                     }
-                    if (grabbedObject) grabbedObject.position.lerp(iPos, 0.25);
-                    rightPinchState = isPinching;
+                    
+                    if (hand.userData.grabbedObject) {
+                        hand.userData.grabbedObject.position.lerp(iPos, 0.25);
+                    }
+                    hand.userData.pinchState = isPinching;
+                }
+            });
+
+            // --- Locomotion Logic ---
+            if (leftHandObj && rightHandObj && leftHandObj.userData.isPalmFacingAway && rightHandObj.userData.isPalmFacingAway) {
+                const avgRelVel = new THREE.Vector3().addVectors(leftHandObj.userData.relVelocity, rightHandObj.userData.relVelocity).multiplyScalar(0.5);
+                const forwardPushSpeed = avgRelVel.dot(headsetForward);
+
+                // Detect pushing hands forward relative to headset
+                if (forwardPushSpeed > 0.05) {
+                    isPushing = true;
                 }
             }
+
+            if (isPushing) {
+                // Apply strict constant speed of 0.165 as requested
+                const targetVel = headsetForward.clone().multiplyScalar(0.165);
+                playerVelocity.lerp(targetVel, 0.1);
+            } else {
+                playerVelocity.multiplyScalar(FRICTION);
+            }
+
+            // Move the rig
+            dolly.position.addScaledVector(playerVelocity, dt * 10);
+            
+            const playerLimit = ROOM_SIZE - 0.5;
+            dolly.position.x = Math.max(-playerLimit, Math.min(playerLimit, dolly.position.x));
+            dolly.position.z = Math.max(-playerLimit, Math.min(playerLimit, dolly.position.z));
         }
 
         function onWindowResize() {
