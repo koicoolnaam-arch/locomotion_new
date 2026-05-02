@@ -95,7 +95,7 @@
         <h1>Corporate Catharsis</h1>
         <h2>Deadline Missed. Time to break everything.</h2>
         <div class="instructions">
-            <p><span class="highlight">Walk:</span> Show the BACK of both your palms to yourself and push AWAY from your body.</p>
+            <p><span class="highlight">Walk:</span> Hold both palms facing AWAY from you to glide forward. Drop hands to stop.</p>
             <p><span class="highlight">Grab & Throw:</span> Pinch your index and thumb together on objects (works for both hands).</p>
             <p><span class="highlight">Punch:</span> Make a fist with either hand and hit objects to shatter them.</p>
         </div>
@@ -342,7 +342,7 @@
             headsetForward.normalize();
 
             const activeHands = [leftHandObj, rightHandObj].filter(h => h && h.joints && h.joints['wrist']);
-            let isPushing = false;
+            let isGliding = false;
 
             activeHands.forEach(hand => {
                 const wrist = hand.joints['wrist'];
@@ -353,15 +353,9 @@
                 hand.userData.absVelocity = new THREE.Vector3().subVectors(wWorldPos, hand.userData.prevAbsPos).divideScalar(dt);
                 hand.userData.prevAbsPos.copy(wWorldPos);
 
-                // Track camera-relative velocity strictly for locomotion (ignoring dolly glides)
-                const wRelPos = wWorldPos.clone().sub(camWorldPos);
-                if (!hand.userData.prevRelPos) hand.userData.prevRelPos = wRelPos.clone();
-                hand.userData.relVelocity = new THREE.Vector3().subVectors(wRelPos, hand.userData.prevRelPos).divideScalar(dt);
-                hand.userData.prevRelPos.copy(wRelPos);
-
                 // Check palm facing direction
                 const palmNormal = new THREE.Vector3(0, -1, 0).applyQuaternion(wrist.quaternion);
-                hand.userData.isPalmFacingAway = palmNormal.dot(headsetForward) > 0.1; // Forgiving threshold for "pushing away"
+                hand.userData.isPalmFacingAway = palmNormal.dot(headsetForward) > 0.1; // Forgiving threshold for "facing away"
 
                 // Interaction Logic (Pinch to Grab, Fist to Punch)
                 const indexTip = hand.joints['index-finger-tip'];
@@ -433,20 +427,16 @@
             });
 
             // --- Locomotion Logic ---
+            // If both hands are active and palms are facing away, trigger the glide
             if (leftHandObj && rightHandObj && leftHandObj.userData.isPalmFacingAway && rightHandObj.userData.isPalmFacingAway) {
-                const avgRelVel = new THREE.Vector3().addVectors(leftHandObj.userData.relVelocity, rightHandObj.userData.relVelocity).multiplyScalar(0.5);
-                const forwardPushSpeed = avgRelVel.dot(headsetForward);
-
-                // Detect pushing hands forward relative to headset
-                if (forwardPushSpeed > 0.05) {
-                    isPushing = true;
-                }
+                isGliding = true;
             }
 
-            if (isPushing) {
-                // Apply strict constant speed of 0.165 as requested
+            if (isGliding) {
+                // Apply strict constant speed of 0.165 as requested. 
+                // We use a gentle lerp factor (0.05) to ensure the start and stop of movement feels incredibly smooth.
                 const targetVel = headsetForward.clone().multiplyScalar(0.165);
-                playerVelocity.lerp(targetVel, 0.1);
+                playerVelocity.lerp(targetVel, 0.05); 
             } else {
                 playerVelocity.multiplyScalar(FRICTION);
             }
