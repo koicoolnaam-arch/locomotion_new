@@ -231,6 +231,7 @@
                 grabbable: isGrabbable,
                 grabbed: false,
                 broken: false,
+                isThrown: false,
                 velocity: new THREE.Vector3(),
                 angularVelocity: new THREE.Vector3(),
                 radius: 0.5 
@@ -242,9 +243,31 @@
             mesh.userData.break = function() {
                 if (this.broken) return;
                 this.broken = true;
-                mesh.material.color.setHex(Math.random() * 0xffffff); // Random color on break
-                this.velocity.set((Math.random()-0.5)*4, 3, (Math.random()-0.5)*4);
-                this.angularVelocity.set(Math.random()*5, Math.random()*5, Math.random()*5);
+                
+                // Spawn shatter debris if it is not already a debris piece
+                if (this.type !== 'debris') {
+                    const pieceCount = 8;
+                    for (let i = 0; i < pieceCount; i++) {
+                        const size = this.radius * (Math.random() * 0.4 + 0.4);
+                        const pieceGeo = new THREE.BoxGeometry(size, size, size);
+                        const piece = createPhysicsMesh(pieceGeo, material, 'debris', mass / pieceCount, false);
+                        piece.position.copy(mesh.position);
+                        piece.position.x += (Math.random() - 0.5) * this.radius;
+                        piece.position.y += (Math.random() - 0.5) * this.radius;
+                        piece.position.z += (Math.random() - 0.5) * this.radius;
+
+                        // Explode outwards based on current velocity
+                        piece.userData.velocity.copy(this.velocity).multiplyScalar(0.5);
+                        piece.userData.velocity.x += (Math.random() - 0.5) * 4;
+                        piece.userData.velocity.y += Math.random() * 3 + 1;
+                        piece.userData.velocity.z += (Math.random() - 0.5) * 4;
+                        piece.userData.angularVelocity.set(Math.random()*10, Math.random()*10, Math.random()*10);
+                    }
+                }
+
+                scene.remove(mesh);
+                mesh.position.set(0, -1000, 0); // Hide original mesh
+                this.velocity.set(0, 0, 0);
             };
 
             scene.add(mesh);
@@ -300,10 +323,16 @@
 
                 const radius = obj.userData.radius || 0.2;
                 if (obj.position.y < FLOOR_Y + radius) {
-                    obj.position.y = FLOOR_Y + radius;
-                    obj.userData.velocity.y *= -0.4; 
-                    obj.userData.velocity.x *= 0.8;
-                    obj.userData.velocity.z *= 0.8;
+                    if (obj.userData.isThrown) {
+                        // Shatter into pieces on floor impact if thrown
+                        obj.userData.break();
+                    } else {
+                        // Regular bounce
+                        obj.position.y = FLOOR_Y + radius;
+                        obj.userData.velocity.y *= -0.4; 
+                        obj.userData.velocity.x *= 0.8;
+                        obj.userData.velocity.z *= 0.8;
+                    }
                 }
             });
         }
@@ -340,7 +369,7 @@
                 let thrust = avgVel.dot(headsetForward);
 
                 if (Math.abs(thrust) > 0.2) {
-                    const speedMultiplier = 0.179; 
+                    const speedMultiplier = 0.170; // Adjusted locomotion speed
                     const targetVel = headsetForward.clone().multiplyScalar(thrust * speedMultiplier);
                     playerVelocity.lerp(targetVel, 0.1);
                 } else {
@@ -393,9 +422,14 @@
                             grabbedObject = closest;
                             grabbedObject.userData.grabbed = true;
                             grabbedObject.userData.velocity.set(0,0,0);
+                            grabbedObject.userData.isThrown = false; // Reset thrown state on grab
                         }
                     } else if (!isPinching && rightPinchState && grabbedObject) {
+                        // Release & Throw Logic
                         grabbedObject.userData.grabbed = false;
+                        const throwVel = rightHandObj.userData.velocity.clone().multiplyScalar(1.5);
+                        grabbedObject.userData.velocity.copy(throwVel);
+                        grabbedObject.userData.isThrown = true; // Flag for shattering on floor impact
                         grabbedObject = null;
                     }
                     if (grabbedObject) grabbedObject.position.lerp(iPos, 0.25);
